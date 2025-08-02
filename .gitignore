@@ -1,6 +1,17 @@
+# Sensitive configuration files
+config.py
 headers_auth.json
+
+# IDE files
 *.iml
 *.idea
+
+# OS files
 *.DS_STORE
+
+# Cache files
 .cache
+.cache-*
+
+# Migration workflow
 migration_workflow.py

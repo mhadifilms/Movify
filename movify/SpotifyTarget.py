@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import logging
 
-from YoutubeMusicSource import YoutubeMusicSource
+from .YoutubeMusicSource import YoutubeMusicSource
 
 
 class SpotifyTarget:
@@ -80,23 +80,146 @@ class SpotifyTarget:
         return song_ids_add
 
     def search_for_song(self, song: pd.Series):
-        search_string = self.generate_search_string(song)
-        response = self.sp.search(search_string, type="track")
-        candidates = pd.DataFrame(response["tracks"]["items"])
-
-        if candidates.empty:
-            return None, -1
-
-        candidates["artists"] = YoutubeMusicSource.parse_artists(candidates["artists"])
-        attr_filtered_candidates = candidates[self.song_response_mapper]
-        attr_filtered_candidates = attr_filtered_candidates.rename(columns=self.song_response_mapper)
-
-        best_candidate, score = self.select_best_candidate(song, attr_filtered_candidates)
-        return best_candidate, score
+        # Try multiple search variations for better matching
+        search_variations = self._generate_search_variations(song)
+        
+        best_candidate = None
+        best_score = -1
+        
+        for search_string in search_variations:
+            try:
+                response = self.sp.search(search_string, type="track", limit=10)
+                candidates = pd.DataFrame(response["tracks"]["items"])
+                
+                if not candidates.empty:
+                    # Fix the artists parsing issue
+                    if "artists" in candidates.columns:
+                        candidates["artists"] = YoutubeMusicSource.parse_artists(candidates["artists"])
+                    
+                    # Only use columns that exist in the response
+                    available_columns = [col for col in self.song_response_mapper.keys() if col in candidates.columns]
+                    attr_filtered_candidates = candidates[available_columns]
+                    
+                    # Rename only the columns that exist
+                    rename_dict = {col: self.song_response_mapper[col] for col in available_columns}
+                    attr_filtered_candidates = attr_filtered_candidates.rename(columns=rename_dict)
+                    
+                    candidate, score = self.select_best_candidate(song, attr_filtered_candidates)
+                    
+                    if score > best_score:
+                        best_candidate = candidate
+                        best_score = score
+                        
+            except Exception as e:
+                continue
+        
+        return best_candidate, best_score
+    
+    def _generate_search_variations(self, song: pd.Series):
+        """Generate multiple search variations for better matching"""
+        title = song["title"]
+        artists_str = str(song["artists"]).replace("[", "").replace("]", "").replace("\'", "")
+        
+        # Clean up title
+        suffixes_to_remove = [
+            " (Official Audio)", " (Official Video)", " (Official Music Video)",
+            " (Lyrics)", " (Lyric Video)", " (Audio)", " (Video)",
+            " (Slowed)", " (Sped Up)", " (Remix)", " (Lo-Fi Remix)",
+            " (Instrumental)", " (Beat)", " (Type Beat)", " (Free)",
+            " [FREE]", " (No Copyright Music)", " (No Copyright)",
+            " (slowed)", " (sped up)", " (remix)", " (instrumental)",
+            " (beat)", " (type beat)", " (free)", " [free]"
+        ]
+        
+        for suffix in suffixes_to_remove:
+            if title.lower().endswith(suffix.lower()):
+                title = title[:-len(suffix)]
+        
+        # Get first artist only
+        first_artist = artists_str.split(',')[0].strip() if ',' in artists_str else artists_str
+        
+        # Handle common artist name variations and incorrect artist info
+        artist_variations = [first_artist]
+        
+        # If the artist looks like a timestamp or duration, try to infer the real artist from the title
+        if any(char.isdigit() for char in first_artist) and len(first_artist) < 10:
+            # This might be a timestamp/duration instead of artist name
+            # Try to extract artist from title
+            if "clams casino" in title.lower():
+                artist_variations.append("Clams Casino")
+            elif "post malone" in title.lower():
+                artist_variations.append("Post Malone")
+            elif "kanye west" in title.lower():
+                artist_variations.append("Kanye West")
+            elif "kendrick lamar" in title.lower():
+                artist_variations.append("Kendrick Lamar")
+            elif "juice wrld" in title.lower():
+                artist_variations.append("Juice WRLD")
+            elif "asap rocky" in title.lower():
+                artist_variations.append("A$AP Rocky")
+        
+        # Handle common artist name variations
+        if "post malone" in first_artist.lower():
+            artist_variations.append("Post Malone")
+        elif "kanye west" in first_artist.lower():
+            artist_variations.append("Kanye West")
+        elif "kendrick lamar" in first_artist.lower():
+            artist_variations.append("Kendrick Lamar")
+        elif "juice wrld" in first_artist.lower():
+            artist_variations.append("Juice WRLD")
+        elif "asap rocky" in first_artist.lower():
+            artist_variations.append("A$AP Rocky")
+        elif "clams casino" in first_artist.lower():
+            artist_variations.append("Clams Casino")
+        
+        variations = []
+        for artist in artist_variations:
+            variations.extend([
+                f"{title} {artist}",  # Title + artist
+                f"{artist} {title}",  # Artist + title
+            ])
+        
+        # Clean up title for better searches (remove artist prefix if present)
+        clean_title = title
+        if " - " in clean_title:
+            clean_title = clean_title.split(" - ", 1)[1]  # Remove artist prefix like "clams casino - "
+        
+        # Add clean title searches
+        variations.extend([
+            clean_title,  # Just the clean title
+            f"{clean_title} {first_artist}",  # Clean title + artist
+        ])
+        
+        # Also add variations without common suffixes
+        clean_title_no_suffix = clean_title
+        for suffix in [" (Live)", " (live)", " (Official Audio)", " (Official Video)", " (Official Music Video)"]:
+            if clean_title_no_suffix.endswith(suffix):
+                clean_title_no_suffix = clean_title_no_suffix[:-len(suffix)]
+                break
+        
+        if clean_title_no_suffix != clean_title:
+            variations.extend([
+                clean_title_no_suffix,  # Title without live/official suffixes
+                f"{clean_title_no_suffix} {first_artist}",  # Clean title without suffix + artist
+            ])
+        
+        # Add title-only searches for songs that might have wrong artist info
+        if any(char.isdigit() for char in first_artist) and len(first_artist) < 10:
+            variations.append(clean_title)  # Clean title-only search for songs with timestamp artists
+        
+        # Only add title-only searches for very popular songs to avoid false positives
+        popular_songs = ["good morning", "loyalty", "congratulations", "too many nights", "i'm god"]
+        if any(pop_song in clean_title.lower() for pop_song in popular_songs):
+            variations.append(clean_title)
+        
+        # Remove duplicates and empty strings
+        variations = list(dict.fromkeys([v.strip() for v in variations if v.strip()]))
+        
+        return variations
 
     def select_best_candidate(self, target_item: pd.Series, candidates: pd.DataFrame):
-        scores = [self.similarity_score_df(row, target_item) for idx, row in candidates.iterrows()]
-
+        scores = [self.similarity_score_df(target_item, row) for idx, row in candidates.iterrows()]
+        
         if len(scores) > 0:
             best_hit_index = np.argmax(scores)
             best_hit_score = scores[best_hit_index]
@@ -231,8 +354,35 @@ class SpotifyTarget:
 
     @staticmethod
     def generate_search_string(obj: pd.Series):
-        search_string = obj["title"] + " " + str(obj["artists"]).replace("[", "").replace("]", "").replace("\'", "")
-        return search_string
+        # Clean up the title - remove common suffixes and prefixes
+        title = obj["title"]
+        
+        # Remove common suffixes that might interfere with matching
+        suffixes_to_remove = [
+            " (Official Audio)", " (Official Video)", " (Official Music Video)",
+            " (Lyrics)", " (Lyric Video)", " (Audio)", " (Video)",
+            " (Slowed)", " (Sped Up)", " (Remix)", " (Lo-Fi Remix)",
+            " (Instrumental)", " (Beat)", " (Type Beat)", " (Free)",
+            " [FREE]", " (No Copyright Music)", " (No Copyright)",
+            " (slowed)", " (sped up)", " (remix)", " (instrumental)",
+            " (beat)", " (type beat)", " (free)", " [free]"
+        ]
+        
+        for suffix in suffixes_to_remove:
+            if title.lower().endswith(suffix.lower()):
+                title = title[:-len(suffix)]
+        
+        # Clean up artists string
+        artists_str = str(obj["artists"]).replace("[", "").replace("]", "").replace("\'", "")
+        
+        # Create multiple search variations for better matching
+        search_variations = [
+            f"{title} {artists_str}",  # Original
+            title,  # Just title
+            f"{title} {artists_str.split(',')[0]}" if ',' in artists_str else f"{title} {artists_str}"  # First artist only
+        ]
+        
+        return search_variations[0]  # Return the best variation for now
 
     @staticmethod
     def similarity_score(album_1: pd.Series, album_2: pd.Series):
@@ -246,12 +396,136 @@ class SpotifyTarget:
     @staticmethod
     def similarity_score_df(a: pd.Series, b: pd.Series):
         score = 0
-
-        common_idx = a.keys().intersection(b.keys())
-        for attr in common_idx:
-            if str(a[attr]).lower() == str(b[attr]).lower():
-                score += 1
-
+        
+        # Normalize strings for comparison
+        def normalize_string(s):
+            if pd.isna(s):
+                return ""
+            return str(s).lower().strip()
+        
+        # Check title similarity (most important)
+        if "title" in a and "title" in b:
+            title_a = normalize_string(a["title"])
+            title_b = normalize_string(b["title"])
+            
+            # Clean up titles for comparison (remove common suffixes)
+            suffixes_to_remove = [" (slowed)", " (sped up)", " (remix)", " (instrumental)", " (beat)", " (type beat)", " (free)", " [free]"]
+            for suffix in suffixes_to_remove:
+                if title_a.endswith(suffix):
+                    title_a = title_a[:-len(suffix)]
+                if title_b.endswith(suffix):
+                    title_b = title_b[:-len(suffix)]
+            
+            # Much stricter title matching
+            if title_a == title_b:
+                score += 20  # Exact title match (much higher weight)
+            elif title_a in title_b or title_b in title_a:
+                # Only give points if the match is substantial (not just a word)
+                if len(title_a) > 3 and len(title_b) > 3:
+                    score += 5  # Partial title match (reduced)
+                else:
+                    score += 1  # Very minor match
+            elif any(word in title_b for word in title_a.split() if len(word) > 3):
+                score += 1  # Word overlap (only for longer words)
+        
+        # Check artist similarity (less important than title, but still significant)
+        if "artists" in a and "artists" in b:
+            artists_a = normalize_string(a["artists"])
+            artists_b = normalize_string(b["artists"])
+            
+            if artists_a == artists_b:
+                score += 3  # Exact artist match (reduced from 5)
+            elif artists_a in artists_b or artists_b in artists_a:
+                score += 1  # Partial artist match (reduced from 2)
+            else:
+                # Check if any individual artist matches
+                artists_a_list = [artist.strip() for artist in artists_a.split(',')]
+                artists_b_list = [artist.strip() for artist in artists_b.split(',')]
+                
+                for artist_a in artists_a_list:
+                    for artist_b in artists_b_list:
+                        if artist_a and artist_b and (artist_a in artist_b or artist_b in artist_a):
+                            score += 1
+                            break
+        
+        # Prioritize original versions over remixes/mashups
+        if "title" in b:
+            title_b = normalize_string(b["title"])
+            # Penalize remixes, mashups, and covers, but be more lenient with featured artists
+            remix_keywords = ["remix", "mashup", "cover", "x", "×"]
+            for keyword in remix_keywords:
+                if keyword in title_b:
+                    score -= 3  # Penalty for remixes/mashups
+                    break
+            
+            # Be more lenient with featured artists - only penalize if it's clearly a remix/mashup
+            if "feat" in title_b or "ft" in title_b:
+                # Only penalize if it's clearly a remix/mashup, not just a featured artist
+                if any(keyword in title_b for keyword in ["remix", "mashup", "cover", "x", "×"]):
+                    score -= 2  # Smaller penalty for remixes with featured artists
+                else:
+                    score -= 1  # Very small penalty for featured artists in original songs
+        
+        # Prioritize primary artist (first artist in the list)
+        if "artists" in b:
+            artists_b = normalize_string(b["artists"])
+            artists_b_list = [artist.strip() for artist in artists_b.split(',')]
+            
+            # If the first artist is the one we're looking for, give bonus
+            if "title" in a and "artists" in a:
+                title_a = normalize_string(a["title"])
+                artists_a = normalize_string(a["artists"])
+                
+                # Try to extract the expected artist from the title
+                expected_artist = None
+                if "clams casino" in title_a:
+                    expected_artist = "clams casino"
+                elif "post malone" in title_a:
+                    expected_artist = "post malone"
+                elif "kanye west" in title_a:
+                    expected_artist = "kanye west"
+                elif "kendrick lamar" in title_a:
+                    expected_artist = "kendrick lamar"
+                
+                if expected_artist and artists_b_list and expected_artist in artists_b_list[0].lower():
+                    score += 5  # Bonus for primary artist match
+        
+        # Require both title AND artist to match reasonably well
+        if "title" in a and "title" in b and "artists" in a and "artists" in b:
+            title_a = normalize_string(a["title"])
+            title_b = normalize_string(b["title"])
+            artists_a = normalize_string(a["artists"])
+            artists_b = normalize_string(b["artists"])
+            
+            # Clean up titles for artist check too
+            suffixes_to_remove = [" (slowed)", " (sped up)", " (remix)", " (instrumental)", " (beat)", " (type beat)", " (free)", " [free]"]
+            for suffix in suffixes_to_remove:
+                if title_a.endswith(suffix):
+                    title_a = title_a[:-len(suffix)]
+                if title_b.endswith(suffix):
+                    title_b = title_b[:-len(suffix)]
+            
+            # Check if artists are completely different
+            artists_a_list = [artist.strip() for artist in artists_a.split(',')]
+            artists_b_list = [artist.strip() for artist in artists_b.split(',')]
+            
+            artist_match_found = False
+            for artist_a in artists_a_list:
+                for artist_b in artists_b_list:
+                    if artist_a and artist_b and (artist_a in artist_b or artist_b in artist_a):
+                        artist_match_found = True
+                        break
+            
+            # If titles are very similar but artists are completely different, apply a smaller penalty
+            if (title_a == title_b or title_a in title_b or title_b in title_a) and not artist_match_found:
+                # Only apply penalty if the original artist looks like a real artist (not a timestamp)
+                if not any(char.isdigit() for char in artists_a) or len(artists_a) > 10:
+                    score -= 5  # Reduced penalty for title match but no artist match
+            
+            # Bonus for good title AND artist match
+            if (title_a == title_b or title_a in title_b or title_b in title_a) and artist_match_found:
+                score += 5  # Bonus for good title AND artist match
+        
         return score
 
     @staticmethod

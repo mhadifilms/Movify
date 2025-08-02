@@ -10,9 +10,10 @@ class YoutubeMusicSource:
 
     def __init__(self):
         try:
-            self.ytmusic = YTMusic('headers_auth.json')
+            # Initialize without authentication for public playlists
+            self.ytmusic = YTMusic()
         except Exception as e:
-            print("Cannot establish connection. Please check the integrity of your auth json. Error: \n")
+            print("Cannot establish connection. Error: \n")
             print(e)
             sys.exit(1)
 
@@ -50,3 +51,35 @@ class YoutubeMusicSource:
             return [str(YoutubeMusicSource.parse_artist(object_artists)) for object_artists in list(artists_json)]
         else:
             return [YoutubeMusicSource.parse_artist(object_artists) for object_artists in list(artists_json)]
+    
+    def get_playlist_from_url(self, url: str) -> pd.DataFrame:
+        """Get playlist data from a YouTube Music URL"""
+        # Extract playlist ID from URL
+        if "list=" in url:
+            playlist_id = url.split("list=")[1].split("&")[0]
+        else:
+            raise ValueError("Invalid playlist URL. Must contain 'list=' parameter")
+        
+        # Get playlist data
+        playlist_data = self.ytmusic.get_playlist(playlist_id)
+        
+        # Convert to DataFrame
+        tracks = playlist_data.get("tracks", [])
+        if not tracks:
+            return pd.DataFrame()
+        
+        df = pd.DataFrame(tracks)
+        
+        # Add playlist info
+        df.insert(0, "playlist_title", playlist_data.get("title", "Unknown Playlist"))
+        df.insert(0, "playlist_id", playlist_id)
+        
+        # Parse artists
+        if "artists" in df.columns:
+            df["artists"] = self.parse_artists(df["artists"])
+        
+        # Select relevant columns
+        columns_to_keep = ["playlist_title", "playlist_id", "title", "artists", "duration"]
+        available_columns = [col for col in columns_to_keep if col in df.columns]
+        
+        return df[available_columns]
