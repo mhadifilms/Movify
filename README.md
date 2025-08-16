@@ -1,10 +1,12 @@
 # Movify - YouTube Music to Spotify Playlist Migrator
 
-A Python tool that migrates YouTube Music playlists to Spotify using public/unlisted playlist URLs. No YouTube Music authentication required!
+A Python tool that migrates YouTube Music playlists and individual videos to Spotify, seamlessly matching songs and adding them to your Spotify library. No YouTube Music authentication required.
 
 ## Features
 
 - 🎵 **Easy Migration**: Migrate YouTube Music playlists to Spotify with just URLs
+- 🎬 **Individual Videos**: Support for individual YouTube video URLs
+- 📝 **Text-based Playlists**: Create playlists from text files or inline text
 - 🔍 **Smart Matching**: Advanced song matching algorithm that handles remixes, live versions, and featured artists
 - 📋 **Batch Processing**: Process multiple playlists at once
 - 🛡️ **Secure**: No YouTube Music credentials needed - works with public/unlisted playlists
@@ -32,6 +34,8 @@ pip install -r requirements.txt
 ### 4. Configure the Tool
 1. Copy `config_template.py` to `config.py` (to keep your credentials private)
 2. Edit `config.py` with your Spotify credentials:
+
+**You can use any combination of these input methods - the tool will process all of them together!**
 ```python
 SPOTIFY_CLIENT_ID = "your_client_id_here"
 SPOTIFY_CLIENT_SECRET = "your_client_secret_here"
@@ -43,16 +47,35 @@ PLAYLIST_URLS = [
     "https://music.youtube.com/playlist?list=YOUR_PLAYLIST_ID",
     # Add more URLs as needed
 ]
+
+# Create text-based playlists
+PLAYLISTS_TEXT = """
+# My Custom Playlist
+https://www.youtube.com/watch?v=Fwgg8r8cznI
+https://www.youtube.com/watch?v=TA0ZeWxDG6M
+
+# Another Playlist
+https://www.youtube.com/watch?v=7XPlOi1-hmM
+"""
 ```
+
+**The tool will automatically process all three input types if they're defined:**
+- `PLAYLIST_URLS`: YouTube Music playlists (original functionality)
+- `PLAYLISTS_TEXT`: Individual videos organized into custom playlists
+- Text files: Use `--from-text` argument for external playlist files
 
 ### 5. Run the Migration
 ```bash
+# Use configuration from config.py
 python migrate_playlists.py
+
+# Or use a text file
+python migrate_playlists.py --from-text /path/to/your/playlists.txt
 ```
 
 ## How It Works
 
-1. **URL Processing**: Extracts playlist IDs from YouTube Music URLs
+1. **URL Processing**: Extracts playlist IDs or video IDs from YouTube URLs
 2. **Data Fetching**: Retrieves track information from YouTube Music
 3. **Smart Matching**: Uses advanced algorithms to match songs on Spotify
 4. **Library Addition**: Adds matched songs to your Spotify library
@@ -68,25 +91,12 @@ The tool uses a sophisticated matching system that:
 - Penalizes remixes/mashups to prefer original versions
 
 ### Supported URL Formats
-- Public playlists: `https://music.youtube.com/playlist?list=PLAYLIST_ID`
-- Unlisted playlists: Same format, just needs to be accessible
-
-## Configuration
-
-### Spotify API Setup
-1. **Client ID & Secret**: From Spotify Developer Dashboard
-2. **User ID**: Your Spotify username (found in your profile)
-3. **Redirect URI**: Must match what you set in the Spotify app
-
-### Playlist URLs
-Add your YouTube Music playlist URLs to the `PLAYLIST_URLS` list in `config.py`:
-```python
-PLAYLIST_URLS = [
-    "https://music.youtube.com/playlist?list=YOUR_FIRST_PLAYLIST_ID",
-    "https://music.youtube.com/playlist?list=YOUR_SECOND_PLAYLIST_ID",
-    # Add more as needed
-]
-```
+- **Playlists**: `https://music.youtube.com/playlist?list=PLAYLIST_ID`
+- **Individual Videos**: 
+  - `https://www.youtube.com/watch?v=VIDEO_ID`
+  - `https://youtu.be/VIDEO_ID`
+  - `https://youtube.com/watch?v=VIDEO_ID`
+- **Mixed Content**: You can mix playlists and individual videos in the same input
 
 ## Troubleshooting
 
@@ -102,28 +112,15 @@ PLAYLIST_URLS = [
 - Ensure the playlist is public or unlisted
 - Verify your Spotify credentials are correct
 
+**"Error processing video"**
+- Check that the video URL is correct and accessible
+- Ensure the video is public or unlisted
+- Some videos may be age-restricted or unavailable
+
 **Authentication errors**
 - Make sure your Spotify Client ID and Secret are correct
 - Check that the Redirect URI matches exactly
 - Ensure your Spotify account is active
-
-### Debug Mode
-For detailed logging, you can modify the script to show more information about the matching process.
-
-## File Structure
-
-```
-Movify/
-├── movify/                    # Core library
-│   ├── __init__.py
-│   ├── SpotifyTarget.py      # Spotify API integration
-│   └── YoutubeMusicSource.py # YouTube Music data fetching
-├── config_template.py         # Configuration template
-├── config.py                  # Your configuration (gitignored)
-├── migrate_playlists.py       # Main migration script
-├── requirements.txt           # Python dependencies
-└── README.md                 # This file
-```
 
 ## Dependencies
 

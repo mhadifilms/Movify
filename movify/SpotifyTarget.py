@@ -29,29 +29,36 @@ class SpotifyTarget:
         self.logger = logging.getLogger("DEBUG")
 
     def add_playlists_to_library(self, playlists: pd.DataFrame, client_id, client_secret, redirect_uri, username):
+        auth_sp = spotipy.Spotify(
+            auth_manager=SpotifyOAuth(
+                client_id, client_secret, redirect_uri, username=username, scope="playlist-modify-private"
+            )
+        )
 
-        auth_sp = spotipy.Spotify(auth_manager=SpotifyOAuth(client_id, client_secret, redirect_uri, username=username,
-                                                            scope="playlist-modify-private"))
-        playlists = playlists.dropna()
+        # Normalize input
+        playlists = playlists.copy()
+        playlists = playlists.dropna(subset=["spotify_id", "playlist_title"])
         playlists = playlists.reset_index(drop=True)
-        playlists.sort_values(by=["playlist_title"])
 
-        curr_playlist = None
-        start_idx = 0
-        for curr_idx, row in playlists.iterrows():
-            if curr_playlist is None:
-                curr_playlist = row["playlist_title"]
+        # Group by target playlist title and create each playlist, adding songs in batches
+        for playlist_title, group in playlists.groupby("playlist_title"):
+            raw_ids = [sid for sid in list(group["spotify_id"]) if pd.notna(sid)]
+            # Only accept IDs that look like valid Spotify track IDs (22-char base62)
+            song_ids = [sid for sid in raw_ids if isinstance(sid, str) and re.fullmatch(r"[A-Za-z0-9]{22}", sid)]
+            if len(song_ids) == 0:
+                print(f"Skipping playlist '{playlist_title}' — 0 valid Spotify matches")
                 continue
-            if row["playlist_title"] != curr_playlist or curr_idx == playlists.shape[0] - 1:
-                playlist_songs = playlists.iloc[start_idx:curr_idx, :]
-                song_ids = playlist_songs["spotify_id"]
-                response = auth_sp.user_playlist_create(auth_sp.current_user()["id"], curr_playlist, public=False)
-                new_playlist_id = response["id"]
 
-                add_to_new_pl = lambda songs: auth_sp.playlist_add_items(new_playlist_id, song_ids)
-                self.execute_in_batches(add_to_new_pl, song_ids, limit=100)
-                curr_playlist = row["playlist_title"]
-                start_idx = curr_idx
+            response = auth_sp.user_playlist_create(
+                auth_sp.current_user()["id"], playlist_title, public=False
+            )
+            new_playlist_id = response["id"]
+
+            def add_batch(batch: list[str]):
+                if batch:
+                    auth_sp.playlist_add_items(new_playlist_id, batch)
+
+            self.execute_in_batches(add_batch, song_ids, limit=100)
 
     def get_spotify_song_ids(self, df: pd.DataFrame) -> List[str]:
         song_ids_add = []
@@ -82,44 +89,60 @@ class SpotifyTarget:
     def search_for_song(self, song: pd.Series):
         # Try multiple search variations for better matching
         search_variations = self._generate_search_variations(song)
-        
+
         best_candidate = None
         best_score = -1
-        
+
         for search_string in search_variations:
             try:
-                response = self.sp.search(search_string, type="track", limit=10)
+                response = self.sp.search(search_string, type="track", limit=20)
                 candidates = pd.DataFrame(response["tracks"]["items"])
-                
+
                 if not candidates.empty:
-                    # Fix the artists parsing issue
                     if "artists" in candidates.columns:
                         candidates["artists"] = YoutubeMusicSource.parse_artists(candidates["artists"])
-                    
-                    # Only use columns that exist in the response
+
                     available_columns = [col for col in self.song_response_mapper.keys() if col in candidates.columns]
                     attr_filtered_candidates = candidates[available_columns]
-                    
-                    # Rename only the columns that exist
+
                     rename_dict = {col: self.song_response_mapper[col] for col in available_columns}
                     attr_filtered_candidates = attr_filtered_candidates.rename(columns=rename_dict)
-                    
+
                     candidate, score = self.select_best_candidate(song, attr_filtered_candidates)
-                    
+
                     if score > best_score:
                         best_candidate = candidate
                         best_score = score
-                        
-            except Exception as e:
+
+            except Exception:
                 continue
-        
+
+        # Fallback: title-only broader search if we still have nothing good
+        if best_score <= 0 and isinstance(song.get("title"), str):
+            try:
+                cleaned_title = re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", song["title"]).strip())
+                response = self.sp.search(cleaned_title, type="track", limit=50)
+                candidates = pd.DataFrame(response["tracks"]["items"])
+                if not candidates.empty:
+                    if "artists" in candidates.columns:
+                        candidates["artists"] = YoutubeMusicSource.parse_artists(candidates["artists"])
+                    available_columns = [col for col in self.song_response_mapper.keys() if col in candidates.columns]
+                    attr_filtered_candidates = candidates[available_columns]
+                    rename_dict = {col: self.song_response_mapper[col] for col in available_columns}
+                    attr_filtered_candidates = attr_filtered_candidates.rename(columns=rename_dict)
+                    candidate, score = self.select_best_candidate(song, attr_filtered_candidates)
+                    if score > best_score:
+                        best_candidate, best_score = candidate, score
+            except Exception:
+                pass
+
         return best_candidate, best_score
     
     def _generate_search_variations(self, song: pd.Series):
         """Generate multiple search variations for better matching"""
         title = song["title"]
         artists_str = str(song["artists"]).replace("[", "").replace("]", "").replace("\'", "")
-        
+
         # Clean up title
         suffixes_to_remove = [
             " (Official Audio)", " (Official Video)", " (Official Music Video)",
@@ -130,21 +153,42 @@ class SpotifyTarget:
             " (slowed)", " (sped up)", " (remix)", " (instrumental)",
             " (beat)", " (type beat)", " (free)", " [free]"
         ]
-        
+
         for suffix in suffixes_to_remove:
             if title.lower().endswith(suffix.lower()):
                 title = title[:-len(suffix)]
-        
+
+        # Strip bracketed content like [...] and (...)
+        title = re.sub(r"\[[^\]]*\]", "", str(title))
+        title = re.sub(r"\([^\)]*\)", "", title)
+        title = title.strip()
+
+        # Try to extract likely artist/title from hyphenated titles often used by compilation channels
+        # e.g. "Epic Neoclassical Music - Audiomachine - Deceit and Betrayal" -> artist: Audiomachine, title: Deceit and Betrayal
+        likely_artist_from_title = None
+        likely_title_from_title = None
+        if " - " in title:
+            segments = [seg.strip() for seg in title.split(" - ") if seg.strip()]
+            if len(segments) >= 2:
+                likely_title_from_title = segments[-1]
+                candidate_artist = segments[-2]
+                descriptor_keywords = [
+                    "music", "orchestral", "cinematic", "epic", "drone", "instrumental",
+                    "records", "studios", "mix", "channel", "official", "masterpiece"
+                ]
+                if not any(kw in candidate_artist.lower() for kw in descriptor_keywords):
+                    likely_artist_from_title = candidate_artist
+
         # Get first artist only
         first_artist = artists_str.split(',')[0].strip() if ',' in artists_str else artists_str
-        
+
+        # Extract quoted titles like Balmorhea "Elegy"
+        quoted_titles = re.findall(r'"([^"]{2,})"', song["title"]) if isinstance(song["title"], str) else []
+
         # Handle common artist name variations and incorrect artist info
         artist_variations = [first_artist]
-        
-        # If the artist looks like a timestamp or duration, try to infer the real artist from the title
+
         if any(char.isdigit() for char in first_artist) and len(first_artist) < 10:
-            # This might be a timestamp/duration instead of artist name
-            # Try to extract artist from title
             if "clams casino" in title.lower():
                 artist_variations.append("Clams Casino")
             elif "post malone" in title.lower():
@@ -157,8 +201,7 @@ class SpotifyTarget:
                 artist_variations.append("Juice WRLD")
             elif "asap rocky" in title.lower():
                 artist_variations.append("A$AP Rocky")
-        
-        # Handle common artist name variations
+
         if "post malone" in first_artist.lower():
             artist_variations.append("Post Malone")
         elif "kanye west" in first_artist.lower():
@@ -171,50 +214,63 @@ class SpotifyTarget:
             artist_variations.append("A$AP Rocky")
         elif "clams casino" in first_artist.lower():
             artist_variations.append("Clams Casino")
-        
+
         variations = []
         for artist in artist_variations:
             variations.extend([
-                f"{title} {artist}",  # Title + artist
-                f"{artist} {title}",  # Artist + title
+                f"{title} {artist}",
+                f"{artist} {title}",
             ])
-        
-        # Clean up title for better searches (remove artist prefix if present)
+
         clean_title = title
         if " - " in clean_title:
-            clean_title = clean_title.split(" - ", 1)[1]  # Remove artist prefix like "clams casino - "
-        
-        # Add clean title searches
+            clean_title = clean_title.split(" - ", 1)[1]
+
         variations.extend([
-            clean_title,  # Just the clean title
-            f"{clean_title} {first_artist}",  # Clean title + artist
+            clean_title,
+            f"{clean_title} {first_artist}",
         ])
-        
-        # Also add variations without common suffixes
+
+        if likely_title_from_title:
+            variations.extend([
+                likely_title_from_title,
+                f"{likely_title_from_title} {first_artist}",
+            ])
+        if likely_artist_from_title and likely_title_from_title:
+            variations.extend([
+                f"{likely_title_from_title} {likely_artist_from_title}",
+                f"{likely_artist_from_title} {likely_title_from_title}",
+            ])
+
+        for qt in quoted_titles:
+            qt_clean = qt.strip()
+            if qt_clean:
+                variations.extend([
+                    qt_clean,
+                    f"{qt_clean} {first_artist}",
+                ])
+
         clean_title_no_suffix = clean_title
         for suffix in [" (Live)", " (live)", " (Official Audio)", " (Official Video)", " (Official Music Video)"]:
             if clean_title_no_suffix.endswith(suffix):
                 clean_title_no_suffix = clean_title_no_suffix[:-len(suffix)]
                 break
-        
+
         if clean_title_no_suffix != clean_title:
             variations.extend([
-                clean_title_no_suffix,  # Title without live/official suffixes
-                f"{clean_title_no_suffix} {first_artist}",  # Clean title without suffix + artist
+                clean_title_no_suffix,
+                f"{clean_title_no_suffix} {first_artist}",
             ])
-        
-        # Add title-only searches for songs that might have wrong artist info
+
         if any(char.isdigit() for char in first_artist) and len(first_artist) < 10:
-            variations.append(clean_title)  # Clean title-only search for songs with timestamp artists
-        
-        # Only add title-only searches for very popular songs to avoid false positives
+            variations.append(clean_title)
+
         popular_songs = ["good morning", "loyalty", "congratulations", "too many nights", "i'm god"]
         if any(pop_song in clean_title.lower() for pop_song in popular_songs):
             variations.append(clean_title)
-        
-        # Remove duplicates and empty strings
+
         variations = list(dict.fromkeys([v.strip() for v in variations if v.strip()]))
-        
+
         return variations
 
     def select_best_candidate(self, target_item: pd.Series, candidates: pd.DataFrame):
@@ -402,6 +458,14 @@ class SpotifyTarget:
             if pd.isna(s):
                 return ""
             return str(s).lower().strip()
+
+        def normalize_for_exact(s: str) -> str:
+            s = s.lower()
+            s = re.sub(r"\[[^\]]*\]", "", s)
+            s = re.sub(r"\([^\)]*\)", "", s)
+            s = re.sub(r"[^\w\s]", " ", s)
+            s = re.sub(r"\s+", " ", s).strip()
+            return s
         
         # Check title similarity (most important)
         if "title" in a and "title" in b:
@@ -427,6 +491,10 @@ class SpotifyTarget:
                     score += 1  # Very minor match
             elif any(word in title_b for word in title_a.split() if len(word) > 3):
                 score += 1  # Word overlap (only for longer words)
+
+            # Exact match ignoring punctuation/parentheticals
+            if normalize_for_exact(title_a) and normalize_for_exact(title_a) == normalize_for_exact(title_b):
+                score += 10
         
         # Check artist similarity (less important than title, but still significant)
         if "artists" in a and "artists" in b:
@@ -516,11 +584,18 @@ class SpotifyTarget:
                         artist_match_found = True
                         break
             
-            # If titles are very similar but artists are completely different, apply a smaller penalty
+            # Heuristic: channel-like uploaders shouldn't cause artist mismatch penalties
+            channel_like_keywords = [
+                "records", "music only", "studios", "channel", "official", "cosmonaut", "cercle", "mix", "cinematic"
+            ]
+            artists_a_is_channel_like = any(kw in artists_a for kw in channel_like_keywords)
+
+            # If titles are very similar but artists are completely different, apply a smaller penalty (or none if channel-like)
             if (title_a == title_b or title_a in title_b or title_b in title_a) and not artist_match_found:
-                # Only apply penalty if the original artist looks like a real artist (not a timestamp)
-                if not any(char.isdigit() for char in artists_a) or len(artists_a) > 10:
-                    score -= 5  # Reduced penalty for title match but no artist match
+                if not artists_a_is_channel_like:
+                    # Only apply penalty if the original artist looks like a real artist (not timestamp/channel)
+                    if not any(char.isdigit() for char in artists_a) or len(artists_a) > 10:
+                        score -= 5  # Reduced penalty for title match but no artist match
             
             # Bonus for good title AND artist match
             if (title_a == title_b or title_a in title_b or title_b in title_a) and artist_match_found:

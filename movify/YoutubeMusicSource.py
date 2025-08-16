@@ -1,6 +1,7 @@
-from typing import Union, List
+from typing import Union, List, Optional
 from functools import reduce
 import sys
+from urllib.parse import urlparse, parse_qs
 
 import pandas as pd
 from ytmusicapi import YTMusic
@@ -83,3 +84,66 @@ class YoutubeMusicSource:
         available_columns = [col for col in columns_to_keep if col in df.columns]
         
         return df[available_columns]
+
+    # ---------------------- NEW: Single-track helpers ----------------------
+    def get_track_from_url(self, url: str) -> pd.DataFrame:
+        """Return a single-track DataFrame with columns: title, artists, duration.
+        Works with youtube.com/watch, music.youtube.com/watch and youtu.be links.
+        """
+        video_id = self._extract_video_id_from_url(url)
+        if not video_id:
+            # If a playlist link was provided by mistake, raise to let caller handle it
+            if "list=" in url and "watch" not in url:
+                raise ValueError("Provided URL looks like a playlist URL, not a track: " + url)
+            raise ValueError("Could not extract videoId from URL: " + url)
+
+        # Prefer watch playlist, as it contains structured artist info
+        try:
+            watch_pl = self.ytmusic.get_watch_playlist(video_id)
+            tracks = watch_pl.get("tracks", [])
+            if tracks:
+                track = tracks[0]
+                title = track.get("title")
+                artists_json = track.get("artists", [])
+                artists = ", ".join([a.get("name", "") for a in artists_json if a.get("name")])
+                duration = track.get("duration")
+                return pd.DataFrame([{ "title": title, "artists": artists, "duration": duration }])
+        except Exception:
+            # Fallback below
+            pass
+
+        # Fallback to get_song (less rich metadata)
+        song = self.ytmusic.get_song(video_id)
+        video_details = song.get("videoDetails", {}) if isinstance(song, dict) else {}
+        title = video_details.get("title")
+        artists = video_details.get("author")  # Channel name as best-effort
+        length_seconds = video_details.get("lengthSeconds")
+        duration = None
+        if length_seconds:
+            try:
+                total = int(length_seconds)
+                minutes = total // 60
+                seconds = total % 60
+                duration = f"{minutes}:{seconds:02d}"
+            except Exception:
+                duration = None
+        return pd.DataFrame([{ "title": title, "artists": artists, "duration": duration }])
+
+    @staticmethod
+    def _extract_video_id_from_url(url: str) -> Optional[str]:
+        """Extract the YouTube videoId (v) from youtube.com, music.youtube.com or youtu.be URLs."""
+        try:
+            parsed = urlparse(url)
+            # youtu.be/VIDEOID
+            if parsed.netloc.endswith("youtu.be"):
+                path = parsed.path.lstrip("/")
+                return path if path else None
+            # youtube.com/watch?v=VIDEOID or music.youtube.com/watch?v=VIDEOID
+            if parsed.path == "/watch":
+                qs = parse_qs(parsed.query)
+                v_list = qs.get("v", [])
+                if v_list:
+                    return v_list[0]
+            return None
+        except Exception:
+            return None
