@@ -13,11 +13,11 @@ from config import (
     PLAYLIST_URLS,
 )
 
-# PLAYLISTS_TEXT is optional - import it if it exists
+# INDIVIDUAL_LINKS is optional - import it if it exists
 try:
-    from config import PLAYLISTS_TEXT
+    from config import INDIVIDUAL_LINKS
 except ImportError:
-    PLAYLISTS_TEXT = None
+    INDIVIDUAL_LINKS = None
 
 
 def parse_text_playlists_file(path: str) -> list[tuple[str, list[str]]]:
@@ -101,6 +101,15 @@ def parse_text_playlists_text(content: str) -> list[tuple[str, list[str]]]:
     return playlists
 
 
+def clean_url_for_individual_track(url: str) -> str:
+    """Clean a URL by removing &list= and everything after it.
+    This ensures individual video URLs work even if they contain playlist parameters.
+    """
+    if "&list=" in url:
+        return url.split("&list=")[0]
+    return url
+
+
 def main():
     parser = argparse.ArgumentParser(description="Migrate YouTube/YouTube Music links into Spotify playlists")
     parser.add_argument(
@@ -138,10 +147,8 @@ def main():
                             per_section_tracks.append(pl_df)
                     else:
                         # Single track URL
-                        t_df = yt.get_track_from_url(url)
+                        t_df = yt.get_track_from_url(url, playlist_title=title)
                         if not t_df.empty:
-                            t_df = t_df.copy()
-                            t_df.insert(0, "playlist_title", title)
                             per_section_tracks.append(t_df)
                 except Exception as e:
                     print(f"   - Skipping URL due to error: {url} -> {e}")
@@ -149,28 +156,31 @@ def main():
             if per_section_tracks:
                 section_df = pd.concat(per_section_tracks, ignore_index=True, sort=False)
                 final_df_list.append(section_df)
+                print(f"   ✅ Added {len(section_df)} tracks to '{title}'")
+            else:
+                print(f"   ❌ No tracks found for '{title}'")
 
-    # Process PLAYLISTS_TEXT if defined (can be string or dict)
-    if isinstance(PLAYLISTS_TEXT, str) and PLAYLISTS_TEXT.strip():
-        sections = parse_text_playlists_text(PLAYLISTS_TEXT)
+    # Process INDIVIDUAL_LINKS if defined (can be string or dict)
+    if isinstance(INDIVIDUAL_LINKS, str) and INDIVIDUAL_LINKS.strip():
+        sections = parse_text_playlists_text(INDIVIDUAL_LINKS)
         if sections:
-            print("🎵 Building playlists from PLAYLISTS_TEXT in config.py...")
+            print("🎵 Building playlists from INDIVIDUAL_LINKS in config.py...")
             for idx, (title, urls) in enumerate(sections, start=1):
                 print(f"\n📋 Processing section {idx}/{len(sections)}: {title} ({len(urls)} links)")
                 per_section_tracks: list[pd.DataFrame] = []
                 for url in urls:
                     try:
-                        if "list=" in url and ("/playlist" in url or "/watch" not in url):
-                            pl_df = yt.get_playlist_from_url(url)
+                        # Clean the URL for individual track processing
+                        cleaned_url = clean_url_for_individual_track(url)
+                        if "list=" in cleaned_url and ("/playlist" in cleaned_url or "/watch" not in cleaned_url):
+                            pl_df = yt.get_playlist_from_url(cleaned_url)
                             if not pl_df.empty:
                                 pl_df = pl_df.copy()
                                 pl_df["playlist_title"] = title
                                 per_section_tracks.append(pl_df)
                         else:
-                            t_df = yt.get_track_from_url(url)
+                            t_df = yt.get_track_from_url(cleaned_url, playlist_title=title)
                             if not t_df.empty:
-                                t_df = t_df.copy()
-                                t_df.insert(0, "playlist_title", title)
                                 per_section_tracks.append(t_df)
                     except Exception as e:
                         print(f"   - Skipping URL due to error: {url} -> {e}")
@@ -178,11 +188,14 @@ def main():
                 if per_section_tracks:
                     section_df = pd.concat(per_section_tracks, ignore_index=True, sort=False)
                     final_df_list.append(section_df)
+                    print(f"   ✅ Added {len(section_df)} tracks to '{title}'")
+                else:
+                    print(f"   ❌ No tracks found for '{title}'")
 
-    elif isinstance(PLAYLISTS_TEXT, dict) and PLAYLISTS_TEXT:
+    elif isinstance(INDIVIDUAL_LINKS, dict) and INDIVIDUAL_LINKS:
         # Accept dict format: { "Playlist Title": ["url1", "url2", ...], ... }
-        items = list(PLAYLISTS_TEXT.items())
-        print("🎵 Building playlists from PLAYLISTS_TEXT dict in config.py...")
+        items = list(INDIVIDUAL_LINKS.items())
+        print("🎵 Building playlists from INDIVIDUAL_LINKS dict in config.py...")
         for idx, (title, urls) in enumerate(items, start=1):
             print(f"\n📋 Processing section {idx}/{len(items)}: {title} ({len(urls)} links)")
             per_section_tracks: list[pd.DataFrame] = []
@@ -191,17 +204,17 @@ def main():
                     normalized = url if isinstance(url, str) and url.startswith("http") else (f"https://{url}" if isinstance(url, str) else "")
                     if not normalized:
                         continue
-                    if "list=" in normalized and ("/playlist" in normalized or "/watch" not in normalized):
-                        pl_df = yt.get_playlist_from_url(normalized)
+                    # Clean the URL for individual track processing
+                    cleaned_url = clean_url_for_individual_track(normalized)
+                    if "list=" in cleaned_url and ("/playlist" in cleaned_url or "/watch" not in cleaned_url):
+                        pl_df = yt.get_playlist_from_url(cleaned_url)
                         if not pl_df.empty:
                             pl_df = pl_df.copy()
                             pl_df["playlist_title"] = title
                             per_section_tracks.append(pl_df)
                     else:
-                        t_df = yt.get_track_from_url(normalized)
+                        t_df = yt.get_track_from_url(cleaned_url, playlist_title=title)
                         if not t_df.empty:
-                            t_df = t_df.copy()
-                            t_df.insert(0, "playlist_title", title)
                             per_section_tracks.append(t_df)
                 except Exception as e:
                     print(f"   - Skipping URL due to error: {url} -> {e}")
@@ -209,6 +222,9 @@ def main():
             if per_section_tracks:
                 section_df = pd.concat(per_section_tracks, ignore_index=True, sort=False)
                 final_df_list.append(section_df)
+                print(f"   ✅ Added {len(section_df)} tracks to '{title}'")
+            else:
+                print(f"   ❌ No tracks found for '{title}'")
 
     # Process PLAYLIST_URLS if defined (original functionality)
     if PLAYLIST_URLS:

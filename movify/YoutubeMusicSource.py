@@ -2,6 +2,7 @@ from typing import Union, List, Optional
 from functools import reduce
 import sys
 from urllib.parse import urlparse, parse_qs
+import re
 
 import pandas as pd
 from ytmusicapi import YTMusic
@@ -86,48 +87,104 @@ class YoutubeMusicSource:
         return df[available_columns]
 
     # ---------------------- NEW: Single-track helpers ----------------------
-    def get_track_from_url(self, url: str) -> pd.DataFrame:
-        """Return a single-track DataFrame with columns: title, artists, duration.
-        Works with youtube.com/watch, music.youtube.com/watch and youtu.be links.
+    def get_track_from_url(self, url: str, playlist_title: str = "Unknown Playlist") -> pd.DataFrame:
+        """Return a single-track DataFrame with columns: playlist_title, title, artists, duration.
+        Works with youtube.com/watch, music.youtube.com/watch, youtu.be links, and playlist index links.
         """
-        video_id = self._extract_video_id_from_url(url)
-        if not video_id:
-            # If a playlist link was provided by mistake, raise to let caller handle it
-            if "list=" in url and "watch" not in url:
-                raise ValueError("Provided URL looks like a playlist URL, not a track: " + url)
-            raise ValueError("Could not extract videoId from URL: " + url)
-
-        # Prefer watch playlist, as it contains structured artist info
         try:
-            watch_pl = self.ytmusic.get_watch_playlist(video_id)
-            tracks = watch_pl.get("tracks", [])
-            if tracks:
-                track = tracks[0]
-                title = track.get("title")
-                artists_json = track.get("artists", [])
-                artists = ", ".join([a.get("name", "") for a in artists_json if a.get("name")])
-                duration = track.get("duration")
-                return pd.DataFrame([{ "title": title, "artists": artists, "duration": duration }])
-        except Exception:
-            # Fallback below
-            pass
+            # Handle playlist index links (e.g., ...&index=6)
+            if "list=" in url and "index=" in url:
+                # Extract playlist ID and index
+                playlist_id = url.split("list=")[1].split("&")[0]
+                index_match = re.search(r'index=(\d+)', url)
+                if index_match:
+                    index = int(index_match.group(1)) - 1  # Convert to 0-based index
+                    try:
+                        playlist_data = self.ytmusic.get_playlist(playlist_id)
+                        tracks = playlist_data.get("tracks", [])
+                        if tracks and 0 <= index < len(tracks):
+                            track = tracks[index]
+                            title = track.get("title", "Unknown Title")
+                            artists_json = track.get("artists", [])
+                            artists = self.parse_artists([artists_json]) if artists_json else "Unknown Artist"
+                            duration = track.get("duration")
+                            
+                            df = pd.DataFrame([{
+                                "playlist_title": playlist_title,
+                                "title": title,
+                                "artists": artists[0] if isinstance(artists, list) else artists,
+                                "duration": duration
+                            }])
+                            return df
+                    except Exception as e:
+                        print(f"   - Failed to get playlist index {index} from {playlist_id}: {e}")
+                        # Fall back to treating this as a regular video URL
+                        print(f"   - Falling back to video extraction...")
+                        pass
 
-        # Fallback to get_song (less rich metadata)
-        song = self.ytmusic.get_song(video_id)
-        video_details = song.get("videoDetails", {}) if isinstance(song, dict) else {}
-        title = video_details.get("title")
-        artists = video_details.get("author")  # Channel name as best-effort
-        length_seconds = video_details.get("lengthSeconds")
-        duration = None
-        if length_seconds:
+            # Handle regular video URLs (including failed playlist index URLs)
+            video_id = self._extract_video_id_from_url(url)
+            if not video_id:
+                print(f"   - Could not extract video ID from URL: {url}")
+                return pd.DataFrame()
+
+            # Try multiple methods to get track info
+            track_info = None
+            
+            # Method 1: Try get_watch_playlist (most reliable)
             try:
-                total = int(length_seconds)
-                minutes = total // 60
-                seconds = total % 60
-                duration = f"{minutes}:{seconds:02d}"
-            except Exception:
-                duration = None
-        return pd.DataFrame([{ "title": title, "artists": artists, "duration": duration }])
+                watch_pl = self.ytmusic.get_watch_playlist(video_id)
+                tracks = watch_pl.get("tracks", [])
+                if tracks:
+                    track = tracks[0]
+                    title = track.get("title")
+                    artists_json = track.get("artists", [])
+                    artists = ", ".join([a.get("name", "") for a in artists_json if a.get("name")])
+                    duration = track.get("duration")
+                    if title and artists:
+                        track_info = {"title": title, "artists": artists, "duration": duration}
+            except Exception as e:
+                pass
+
+            # Method 2: Try get_song if first method failed
+            if not track_info:
+                try:
+                    song = self.ytmusic.get_song(video_id)
+                    video_details = song.get("videoDetails", {}) if isinstance(song, dict) else {}
+                    title = video_details.get("title")
+                    artists = video_details.get("author")  # Channel name as best-effort
+                    length_seconds = video_details.get("lengthSeconds")
+                    
+                    if title and artists:
+                        duration = None
+                        if length_seconds:
+                            try:
+                                total = int(length_seconds)
+                                minutes = total // 60
+                                seconds = total % 60
+                                duration = f"{minutes}:{seconds:02d}"
+                            except Exception:
+                                pass
+                        track_info = {"title": title, "artists": artists, "duration": duration}
+                except Exception as e:
+                    print(f"   - Failed to get song info for {video_id}: {e}")
+
+            # Return DataFrame if we got track info
+            if track_info:
+                df = pd.DataFrame([{
+                    "playlist_title": playlist_title,
+                    "title": track_info["title"],
+                    "artists": track_info["artists"],
+                    "duration": track_info["duration"]
+                }])
+                return df
+            
+            print(f"   - Could not extract track info from {url}")
+            return pd.DataFrame()
+            
+        except Exception as e:
+            print(f"   - Error processing {url}: {e}")
+            return pd.DataFrame()
 
     @staticmethod
     def _extract_video_id_from_url(url: str) -> Optional[str]:

@@ -48,20 +48,22 @@ PLAYLIST_URLS = [
     # Add more URLs as needed
 ]
 
-# Create text-based playlists
-PLAYLISTS_TEXT = """
-# My Custom Playlist
-https://www.youtube.com/watch?v=Fwgg8r8cznI
-https://www.youtube.com/watch?v=TA0ZeWxDG6M
-
-# Another Playlist
-https://www.youtube.com/watch?v=7XPlOi1-hmM
-"""
+# Individual YouTube video/playlist links organized into custom playlists
+INDIVIDUAL_LINKS = {
+    "My Custom Playlist": [
+        "https://www.youtube.com/watch?v=VIDEO_ID_1",
+        "https://www.youtube.com/watch?v=VIDEO_ID_2",
+    ],
+    "Another Playlist": [
+        "https://music.youtube.com/playlist?list=PLAYLIST_ID",  # Can mix playlists too!
+        "https://www.youtube.com/watch?v=VIDEO_ID_3",
+    ]
+}
 ```
 
 **The tool will automatically process all three input types if they're defined:**
 - `PLAYLIST_URLS`: YouTube Music playlists (original functionality)
-- `PLAYLISTS_TEXT`: Individual videos organized into custom playlists
+- `INDIVIDUAL_LINKS`: Individual videos organized into custom playlists
 - Text files: Use `--from-text` argument for external playlist files
 
 ### 5. Run the Migration

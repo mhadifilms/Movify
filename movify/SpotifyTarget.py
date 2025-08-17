@@ -275,7 +275,7 @@ class SpotifyTarget:
 
     def select_best_candidate(self, target_item: pd.Series, candidates: pd.DataFrame):
         scores = [self.similarity_score_df(target_item, row) for idx, row in candidates.iterrows()]
-        
+
         if len(scores) > 0:
             best_hit_index = np.argmax(scores)
             best_hit_score = scores[best_hit_index]
@@ -452,7 +452,7 @@ class SpotifyTarget:
     @staticmethod
     def similarity_score_df(a: pd.Series, b: pd.Series):
         score = 0
-        
+
         # Normalize strings for comparison
         def normalize_string(s):
             if pd.isna(s):
@@ -600,7 +600,7 @@ class SpotifyTarget:
             # Bonus for good title AND artist match
             if (title_a == title_b or title_a in title_b or title_b in title_a) and artist_match_found:
                 score += 5  # Bonus for good title AND artist match
-        
+
         return score
 
     @staticmethod
@@ -609,10 +609,11 @@ class SpotifyTarget:
 
     @staticmethod
     def execute_in_batches(func: Callable, _list: list, limit: int, ):
-        batches = int(len(_list) / limit)
-        for i in range(batches + 1):
-            lower_idx = i * limit
-
-            full_upper_idx = (i + 1) * limit
-            upper_idx = full_upper_idx if full_upper_idx <= len(_list) - 1 else len(_list) - 1
-            func(_list[lower_idx:upper_idx])
+        # Robust batching: iterate by step and slice with proper exclusive upper bound
+        if not _list:
+            return
+        for start in range(0, len(_list), limit):
+            end = min(start + limit, len(_list))
+            batch = _list[start:end]
+            if batch:
+                func(batch)

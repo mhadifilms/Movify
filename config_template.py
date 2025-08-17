@@ -13,16 +13,11 @@ PLAYLIST_URLS = [
     # Add more URLs as needed
 ]
 
-# Individual YouTube Video URLs
-# Add individual YouTube video URLs here
-INDIVIDUAL_VIDEO_URLS = [
-    "https://www.youtube.com/watch?v=Fwgg8r8cznI",
-    "https://youtu.be/TA0ZeWxDG6M",
-]
 
 
-# Format 2: Dictionary with playlist titles as keys
-PLAYLISTS_TEXT = {
+
+# Individual YouTube video/playlist links organized into custom playlists
+INDIVIDUAL_LINKS = {
     "cinematic music": [
         "https://www.youtube.com/watch?v=Fwgg8r8cznI",
         "https://www.youtube.com/watch?v=TA0ZeWxDG6M",
